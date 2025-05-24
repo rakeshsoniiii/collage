@@ -1,271 +1,382 @@
+import tkinter as tk
+from tkinter import messagebox, simpledialog
 import cv2
 import os
 import numpy as np
-import tkinter as tk
-from tkinter import messagebox, simpledialog, scrolledtext
-from PIL import Image, ImageTk
 import pickle
-import shutil
-import datetime
+import pyttsx3
+import threading
+from datetime import datetime
 
-# Paths and files
-faces_path = "faces"
-os.makedirs(faces_path, exist_ok=True)
-users_file = "users.pkl"  # Stores username-password dict
-log_file = "activity.log"
-
-# Load Haar cascade
-face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+# Initialize face detector and recognizer
+face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
 recognizer = cv2.face.LBPHFaceRecognizer_create()
 
-# Globals
-cap = None
-recognizing = False
-label_dict = {}
-current_user = None
+# Initialize text-to-speech engine
+engine = pyttsx3.init()
+engine.setProperty('rate', 150)
 
-# Load or create user database (username: password)
-if os.path.exists(users_file):
-    with open(users_file, "rb") as f:
-        users_db = pickle.load(f)
-else:
-    users_db = {}
-    with open(users_file, "wb") as f:
-        pickle.dump(users_db, f)
+# Create directories if they don't exist
+if not os.path.exists('faces'):
+    os.makedirs('faces')
+if not os.path.exists('user_data'):
+    os.makedirs('user_data')
 
-def log_activity(text):
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    log_entry = f"[{timestamp}] {text}\n"
-    with open(log_file, "a") as f:
-        f.write(log_entry)
-    activity_text.config(state='normal')
-    activity_text.insert(tk.END, log_entry)
-    activity_text.see(tk.END)
-    activity_text.config(state='disabled')
+# User database
+users = {}
+if os.path.exists('user_data/users.pkl'):
+    with open('user_data/users.pkl', 'rb') as f:
+        users = pickle.load(f)
 
-def detect_and_display():
-    global cap, recognizing, frame_label, current_user
-    if cap is None:
-        cap = cv2.VideoCapture(0)
+def speak(text):
+    def _speak():
+        engine.say(text)
+        engine.runAndWait()
+    threading.Thread(target=_speak).start()
 
-    ret, frame = cap.read()
-    if not ret:
-        return
-
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    faces = face_cascade.detectMultiScale(gray, 1.3, 5)
-
-    for (x, y, w, h) in faces:
-        roi = gray[y:y+h, x:x+w]
-        roi = cv2.resize(roi, (200, 200))
-
-        if recognizing:
-            try:
-                label, confidence = recognizer.predict(roi)
-                if confidence < 100:
-                    name = label_dict.get(label, "Unknown")
-                else:
-                    name = "Unknown"
-            except:
-                name = "Unknown"
-            cv2.putText(frame, name, (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-            if name != "Unknown" and name == current_user:
-                log_activity(f"User '{current_user}' recognized successfully.")
-
-        cv2.rectangle(frame, (x, y), (x+w, y+h), (255, 0, 0), 2)
-
-    img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-    imgtk = ImageTk.PhotoImage(image=img)
-    frame_label.imgtk = imgtk
-    frame_label.configure(image=imgtk)
-    frame_label.after(10, detect_and_display)
-
-def start_recognition():
-    global recognizing, label_dict, current_user
-    if not current_user:
-        messagebox.showerror("Error", "Please login first.")
-        return
-    try:
-        recognizer.read("face_model.xml")
-        with open("labels.pkl", "rb") as f:
-            label_dict = pickle.load(f)
-        recognizing = True
-        log_activity(f"User '{current_user}' started face recognition.")
-        detect_and_display()
-    except:
-        messagebox.showerror("Error", "Train the model first!")
-
-def add_user():
-    global current_user
-    if not current_user:
-        messagebox.showerror("Error", "Please login first.")
-        return
-    user_path = os.path.join(faces_path, current_user)
-    os.makedirs(user_path, exist_ok=True)
-
-    cap = cv2.VideoCapture(0)
-    count = 0
-    while True:
-        ret, frame = cap.read()
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        faces = face_cascade.detectMultiScale(gray, 1.3, 5)
-
-        for (x, y, w, h) in faces:
-            face = gray[y:y+h, x:x+w]
-            face = cv2.resize(face, (200, 200))
-            count += 1
-            cv2.imwrite(f"{user_path}/{count}.jpg", face)
-            cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
-
-        cv2.imshow("Adding User Images", frame)
-        if cv2.waitKey(1) == 13 or count == 100:
-            break
-
-    cap.release()
-    cv2.destroyAllWindows()
-    messagebox.showinfo("Success", f"Saved 100 images for user: {current_user}")
-    log_activity(f"User '{current_user}' added face images.")
-
-def train_model():
-    global current_user
-    if not current_user:
-        messagebox.showerror("Error", "Please login first.")
-        return
-    data, labels = [], []
-    label_map = {}
-    current_label = 0
-
-    for user in os.listdir(faces_path):
-        user_folder = os.path.join(faces_path, user)
-        if not os.path.isdir(user_folder):
-            continue
-        label_map[current_label] = user
-        for img_name in os.listdir(user_folder):
-            img_path = os.path.join(user_folder, img_name)
-            img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
-            data.append(np.asarray(img, dtype=np.uint8))
-            labels.append(current_label)
-        current_label += 1
-
-    if not data:
-        messagebox.showerror("Error", "No data found to train.")
-        return
-
-    recognizer.train(data, np.asarray(labels))
-    recognizer.save("face_model.xml")
-    with open("labels.pkl", "wb") as f:
-        pickle.dump(label_map, f)
-    messagebox.showinfo("Success", "Model trained successfully!")
-    log_activity(f"User '{current_user}' trained the model.")
-
-def logout():
-    global recognizing, cap, current_user
-    recognizing = False
-    current_user = None
-    if cap:
-        cap.release()
-    frame_label.configure(image="")
-    messagebox.showinfo("Logout", "Logged out successfully.")
-    login_frame.pack()
-    main_frame.pack_forget()
-    log_activity(f"User logged out.")
-
-def delete_user():
-    if not current_user:
-        messagebox.showerror("Error", "Please login first.")
-        return
-    confirm = messagebox.askyesno("Confirm Delete", f"Delete user '{current_user}' and all data?")
-    if confirm:
-        user_path = os.path.join(faces_path, current_user)
-        if os.path.exists(user_path):
-            shutil.rmtree(user_path)
-            messagebox.showinfo("Deleted", f"User '{current_user}' deleted.")
-            log_activity(f"User '{current_user}' deleted their data.")
+class FaceRecognitionApp:
+    def _init_(self, root):
+        self.root = root
+        self.root.title("Secure Face Recognition System")
+        self.root.geometry("800x600")
+        
+        self.current_user = None
+        self.current_frame = None
+        self.door_status = "LOCKED"
+        self.recognizer_trained = False
+        
+        # Load or train recognizer at startup
+        self.load_or_train_recognizer()
+        self.show_main_page()
+    
+    def load_or_train_recognizer(self):
+        if os.path.exists('user_data/face_recognizer.yml'):
+            recognizer.read('user_data/face_recognizer.yml')
+            self.recognizer_trained = True
         else:
-            messagebox.showerror("Error", f"User '{current_user}' data not found.")
+            self.train_recognizer()
+    
+    def clear_frame(self):
+        if self.current_frame:
+            self.current_frame.destroy()
+    
+    def show_main_page(self):
+        self.clear_frame()
+        self.current_frame = tk.Frame(self.root)
+        self.current_frame.pack(expand=True, fill='both')
+        
+        tk.Label(self.current_frame, text="Security System", font=("Arial", 24)).pack(pady=30)
+        
+        tk.Button(self.current_frame, text="Register", font=("Arial", 16), 
+                 command=self.show_register_page, width=20, height=2).pack(pady=20)
+        
+        tk.Button(self.current_frame, text="Login", font=("Arial", 16), 
+                 command=self.show_login_page, width=20, height=2).pack(pady=20)
+    
+    def show_register_page(self):
+        self.clear_frame()
+        self.current_frame = tk.Frame(self.root)
+        self.current_frame.pack(expand=True, fill='both')
+        
+        tk.Label(self.current_frame, text="Register New User", font=("Arial", 20)).pack(pady=20)
+        
+        self.username_var = tk.StringVar()
+        tk.Label(self.current_frame, text="Username:", font=("Arial", 14)).pack()
+        tk.Entry(self.current_frame, textvariable=self.username_var, font=("Arial", 14)).pack()
+        
+        tk.Button(self.current_frame, text="Capture Face", font=("Arial", 14), 
+                 command=self.capture_face_for_registration).pack(pady=20)
+        
+        tk.Button(self.current_frame, text="Back", font=("Arial", 12), 
+                 command=self.show_main_page).pack()
+    
+    def capture_face_for_registration(self):
+        username = self.username_var.get().strip()
+        if not username:
+            messagebox.showerror("Error", "Please enter a username")
+            return
+        
+        if username in users:
+            messagebox.showerror("Error", "Username already exists")
+            return
+        
+        cap = cv2.VideoCapture(0)
+        face_samples = []
+        sample_count = 0
+        required_samples = 30  # Increased number of samples for better training
+        
+        def update_frame():
+            nonlocal sample_count
+            ret, frame = cap.read()
+            if not ret:
+                return
+            
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            faces = face_cascade.detectMultiScale(gray, scaleFactor=1.3, minNeighbors=5, minSize=(100, 100))
+            
+            for (x, y, w, h) in faces:
+                if w > 100 and h > 100:  # Minimum face size
+                    face_roi = gray[y:y+h, x:x+w]
+                    
+                    # Check face quality by looking at variance (blurry faces have low variance)
+                    face_variance = cv2.Laplacian(face_roi, cv2.CV_64F).var()
+                    
+                    if face_variance > 50:  # Only accept clear faces
+                        face_img = cv2.resize(face_roi, (200, 200))  # Resize for consistency
+                        face_samples.append(face_img)
+                        sample_count += 1
+                        cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
+                        cv2.putText(frame, f"Samples: {sample_count}/{required_samples}", (x, y-10), 
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                        cv2.putText(frame, f"Quality: {face_variance:.1f}", (x, y+h+20), 
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                    else:
+                        cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 0, 255), 2)
+                        cv2.putText(frame, "Low Quality", (x, y-10), 
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            
+            cv2.imshow('Register Face - Press Q when done', frame)
+            
+            if cv2.waitKey(1) & 0xFF == ord('q') or sample_count >= required_samples:
+                cap.release()
+                cv2.destroyAllWindows()
+                
+                if len(face_samples) >= 25:  # Require at least 25 good samples
+                    user_id = len(users) + 1
+                    user_dir = f"faces/{user_id}"
+                    os.makedirs(user_dir, exist_ok=True)
+                    
+                    # Save all face samples
+                    for i, face in enumerate(face_samples):
+                        cv2.imwrite(f"{user_dir}/{i}.png", face)
+                    
+                    # Add user to database
+                    users[username] = {
+                        'id': user_id,
+                        'pin': None,
+                        'registered_at': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        'face_samples': len(face_samples)
+                    }
+                    self.save_users()
+                    
+                    # Train with new data
+                    self.train_recognizer()
+                    
+                    messagebox.showinfo("Success", f"Face registered with {len(face_samples)} samples! Now set your PIN")
+                    self.setup_pin_after_registration(username)
+                else:
+                    messagebox.showerror("Error", f"Not enough good quality face samples captured ({len(face_samples)}/25)")
+        
+        while cap.isOpened() and sample_count < required_samples:
+            update_frame()
+    
+    def setup_pin_after_registration(self, username):
+        pin = simpledialog.askstring("PIN Setup", "Set 4-digit PIN:", show='*')
+        if pin and len(pin) == 4 and pin.isdigit():
+            users[username]['pin'] = pin
+            self.save_users()
+            messagebox.showinfo("Success", "Registration complete!")
+            speak(f"Registration successful for {username}")
+            self.show_main_page()
+        else:
+            messagebox.showerror("Error", "PIN must be 4 digits")
+            self.setup_pin_after_registration(username)
+    
+    def show_login_page(self):
+        self.clear_frame()
+        self.current_frame = tk.Frame(self.root)
+        self.current_frame.pack(expand=True, fill='both')
+        
+        tk.Label(self.current_frame, text="Login", font=("Arial", 20)).pack(pady=20)
+        
+        self.login_username_var = tk.StringVar()
+        tk.Label(self.current_frame, text="Username:", font=("Arial", 14)).pack()
+        tk.Entry(self.current_frame, textvariable=self.login_username_var, font=("Arial", 14)).pack()
+        
+        tk.Button(self.current_frame, text="Login with Face", font=("Arial", 14), 
+                 command=self.login_with_face).pack(pady=20)
+        
+        tk.Button(self.current_frame, text="Login with PIN", font=("Arial", 14), 
+                 command=self.login_with_pin).pack(pady=20)
+        
+        tk.Button(self.current_frame, text="Back", font=("Arial", 12), 
+                 command=self.show_main_page).pack()
+    
+    def login_with_face(self):
+        if not self.recognizer_trained:
+            messagebox.showerror("Error", "Face recognizer not trained yet")
+            return
+            
+        username = self.login_username_var.get().strip()
+        if not username:
+            messagebox.showerror("Error", "Please enter username")
+            return
+        
+        if username not in users:
+            messagebox.showerror("Error", "User not found")
+            return
+        
+        user_id = users[username]['id']
+        cap = cv2.VideoCapture(0)
+        recognized = False
+        attempts = 0
+        max_attempts = 3  # Reduced attempts for security
+        confidence_threshold = 50  # Lower is better (more strict)
+        
+        def recognize_face():
+            nonlocal recognized, attempts
+            ret, frame = cap.read()
+            if not ret:
+                return
+            
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            faces = face_cascade.detectMultiScale(gray, scaleFactor=1.3, minNeighbors=5, minSize=(100, 100))
+            
+            for (x, y, w, h) in faces:
+                if w > 100 and h > 100:  # Minimum face size
+                    face_roi = gray[y:y+h, x:x+w]
+                    face_img = cv2.resize(face_roi, (200, 200))  # Must match training size
+                    
+                    # Check face quality before recognition
+                    face_variance = cv2.Laplacian(face_roi, cv2.CV_64F).var()
+                    if face_variance < 50:  # Skip blurry faces
+                        cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 0, 255), 2)
+                        cv2.putText(frame, "Low Quality", (x, y-10), 
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                        attempts += 1
+                        continue
+                    
+                    id_, confidence = recognizer.predict(face_img)
+                    
+                    # Strict matching - only accept if confidence is very low (good match)
+                    if id_ == user_id and confidence < confidence_threshold:
+                        recognized = True
+                        cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
+                        cv2.putText(frame, f"Welcome {username} ({confidence:.1f})", (x, y-10), 
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                    else:
+                        attempts += 1
+                        cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 0, 255), 2)
+                        cv2.putText(frame, f"Attempt {attempts}/{max_attempts}", (x, y-10), 
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                        cv2.putText(frame, f"Confidence: {confidence:.1f}", (x, y+h+20), 
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+            
+            cv2.imshow('Face Login - Press Q to cancel', frame)
+            
+            if cv2.waitKey(1) & 0xFF == ord('q') or recognized or attempts >= max_attempts:
+                cap.release()
+                cv2.destroyAllWindows()
+                
+                if recognized:
+                    self.current_user = username
+                    speak(f"Welcome {username}. Door is now open")
+                    self.log_access(username, "FACE", True)
+                    self.show_door_open_page()
+                else:
+                    messagebox.showerror("Error", "Face not recognized")
+                    self.log_access(username, "FACE", False)
+                    speak("Face recognition failed. Access denied")
+        
+        while cap.isOpened() and not recognized and attempts < max_attempts:
+            recognize_face()
+    
+    def login_with_pin(self):
+        username = self.login_username_var.get().strip()
+        if not username:
+            messagebox.showerror("Error", "Please enter username")
+            return
+        
+        if username not in users:
+            messagebox.showerror("Error", "User not found")
+            return
+        
+        if not users[username]['pin']:
+            messagebox.showerror("Error", "No PIN set for this user")
+            return
+        
+        pin = simpledialog.askstring("PIN Login", "Enter 4-digit PIN:", show='*')
+        if pin and pin == users[username]['pin']:
+            self.current_user = username
+            speak(f"Welcome {username}. Door is now open")
+            self.log_access(username, "PIN", True)
+            self.show_door_open_page()
+        else:
+            messagebox.showerror("Error", "Incorrect PIN")
+            self.log_access(username, "PIN", False)
+            speak("Incorrect PIN. Access denied")
+    
+    def show_door_open_page(self):
+        self.clear_frame()
+        self.current_frame = tk.Frame(self.root)
+        self.current_frame.pack(expand=True, fill='both')
+        
+        tk.Label(self.current_frame, text="DOOR IS OPEN", 
+                font=("Arial", 24, "bold"), fg="green").pack(pady=50)
+        
+        tk.Label(self.current_frame, text=f"Welcome {self.current_user}", 
+                font=("Arial", 18)).pack(pady=10)
+        
+        tk.Button(self.current_frame, text="Lock Door", font=("Arial", 16), 
+                 command=self.lock_door, width=20, height=2).pack(pady=20)
+        
+        self.door_status = "UNLOCKED"
+        self.root.after(10000, self.lock_door)  # Auto lock after 10 sec
+    
+    def lock_door(self):
+        if self.door_status == "UNLOCKED":
+            self.door_status = "LOCKED"
+            speak("Door is now locked")
+            self.show_main_page()
+    
+    def train_recognizer(self):
+        if not users:
+            self.recognizer_trained = False
+            return
+            
+        faces = []
+        ids = []
+        
+        for user in users:
+            user_id = users[user]['id']
+            user_dir = f"faces/{user_id}"
+            
+            if os.path.exists(user_dir):
+                for image_name in os.listdir(user_dir):
+                    image_path = f"{user_dir}/{image_name}"
+                    img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+                    if img is not None:
+                        img = cv2.resize(img, (200, 200))  # Consistent size
+                        faces.append(img)
+                        ids.append(user_id)
+        
+        if faces and ids:
+            recognizer.train(faces, np.array(ids))
+            recognizer.save('user_data/face_recognizer.yml')
+            self.recognizer_trained = True
+            print(f"Recognizer trained with {len(faces)} samples for {len(set(ids))} users")
+        else:
+            self.recognizer_trained = False
+            print("No training data available")
+    
+    def log_access(self, username, method, success):
+        log_entry = {
+            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            'method': method,
+            'success': success
+        }
+        
+        if 'access_log' not in users[username]:
+            users[username]['access_log'] = []
+        
+        users[username]['access_log'].append(log_entry)
+        self.save_users()
+    
+    def save_users(self):
+        with open('user_data/users.pkl', 'wb') as f:
+            pickle.dump(users, f)
 
-def login():
-    global current_user
-    username = username_entry.get().strip()
-    password = password_entry.get().strip()
-
-    if username in users_db and users_db[username] == password:
-        current_user = username
-        messagebox.showinfo("Success", f"Welcome {username}!")
-        log_activity(f"User '{username}' logged in successfully.")
-        login_frame.pack_forget()
-        main_frame.pack()
-    else:
-        messagebox.showerror("Error", "Invalid username or password.")
-        log_activity(f"Failed login attempt for username '{username}'.")
-
-def register():
-    username = simpledialog.askstring("Register", "Enter new username:")
-    if not username:
-        return
-    if username in users_db:
-        messagebox.showerror("Error", "Username already exists.")
-        return
-    password = simpledialog.askstring("Register", "Enter password:", show='*')
-    if not password:
-        return
-    users_db[username] = password
-    with open(users_file, "wb") as f:
-        pickle.dump(users_db, f)
-    messagebox.showinfo("Success", f"User '{username}' registered successfully.")
-    log_activity(f"User '{username}' registered.")
-
-# GUI Setup
-
-root = tk.Tk()
-root.title("Face Recognition System with Login")
-root.geometry("900x700")
-
-# Login frame
-login_frame = tk.Frame(root)
-login_frame.pack(pady=100)
-
-tk.Label(login_frame, text="Username:").grid(row=0, column=0, padx=5, pady=5)
-username_entry = tk.Entry(login_frame)
-username_entry.grid(row=0, column=1, padx=5, pady=5)
-
-tk.Label(login_frame, text="Password:").grid(row=1, column=0, padx=5, pady=5)
-password_entry = tk.Entry(login_frame, show="*")
-password_entry.grid(row=1, column=1, padx=5, pady=5)
-
-login_btn = tk.Button(login_frame, text="Login", command=login)
-login_btn.grid(row=2, column=0, columnspan=2, pady=10)
-
-register_btn = tk.Button(login_frame, text="Register", command=register)
-register_btn.grid(row=3, column=0, columnspan=2, pady=5)
-
-# Main frame (hidden until login)
-main_frame = tk.Frame(root)
-
-frame_label = tk.Label(main_frame)
-frame_label.pack()
-
-btn_frame = tk.Frame(main_frame)
-btn_frame.pack(pady=10)
-
-btn_add = tk.Button(btn_frame, text="Add Face Images", command=add_user)
-btn_add.grid(row=0, column=0, padx=10)
-
-btn_train = tk.Button(btn_frame, text="Train Model", command=train_model)
-btn_train.grid(row=0, column=1, padx=10)
-
-btn_recognize = tk.Button(btn_frame, text="Start Recognition", command=start_recognition)
-btn_recognize.grid(row=0, column=2, padx=10)
-
-btn_logout = tk.Button(btn_frame, text="Logout", command=logout)
-btn_logout.grid(row=0, column=3, padx=10)
-
-btn_delete = tk.Button(btn_frame, text="Delete User", command=delete_user)
-btn_delete.grid(row=0, column=4, padx=10)
-
-# Activity log display
-tk.Label(main_frame, text="User Activity Log:").pack()
-activity_text = scrolledtext.ScrolledText(main_frame, height=10, state='disabled')
-activity_text.pack(fill=tk.X, padx=10, pady=5)
-
-root.mainloop()
+if _name_ == "_main_":
+    root = tk.Tk()
+    app = FaceRecognitionApp(root)
+    root.mainloop()
