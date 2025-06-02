@@ -3,11 +3,16 @@ from tkinter import messagebox, simpledialog, ttk
 import cv2
 import os
 import numpy as np
-import pickle
+import sqlite3
 import pyttsx3
 import threading
 from datetime import datetime
 from PIL import Image, ImageTk, ImageDraw, ImageFont
+import hashlib
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.image import MIMEImage
 
 # Initialize face detector and recognizer
 face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
@@ -20,14 +25,131 @@ engine.setProperty('rate', 150)
 # Create directories if they don't exist
 if not os.path.exists('faces'):
     os.makedirs('faces')
-if not os.path.exists('user_data'):
-    os.makedirs('user_data')
 
-# User database
-users = {}
-if os.path.exists('user_data/users.pkl'):
-    with open('user_data/users.pkl', 'rb') as f:
-        users = pickle.load(f)
+class Database:
+    def __init__(self):
+        self.conn = sqlite3.connect('user_data.db')
+        self.create_tables()
+    
+    def create_tables(self):
+        cursor = self.conn.cursor()
+        
+        # Users table
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            pin_hash TEXT,
+            registered_at TEXT NOT NULL,
+            face_samples INTEGER,
+            last_access TEXT
+        )
+        ''')
+        
+        # Access logs table
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS access_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            timestamp TEXT NOT NULL,
+            method TEXT NOT NULL,
+            success INTEGER NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users (id)
+        )
+        ''')
+        
+        self.conn.commit()
+    
+    def add_user(self, username, pin_hash=None, face_samples=0):
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute('''
+            INSERT INTO users (username, pin_hash, registered_at, face_samples)
+            VALUES (?, ?, ?, ?)
+            ''', (username, pin_hash, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), face_samples))
+            user_id = cursor.lastrowid
+            self.conn.commit()
+            return user_id
+        except sqlite3.IntegrityError:
+            return None
+    
+    def get_user(self, username):
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT * FROM users WHERE username = ?', (username,))
+        return cursor.fetchone()
+    
+    def get_user_by_id(self, user_id):
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT * FROM users WHERE id = ?', (user_id,))
+        return cursor.fetchone()
+    
+    def update_user_pin(self, username, pin_hash):
+        cursor = self.conn.cursor()
+        cursor.execute('''
+        UPDATE users SET pin_hash = ? WHERE username = ?
+        ''', (pin_hash, username))
+        self.conn.commit()
+    
+    def update_user_last_access(self, username):
+        cursor = self.conn.cursor()
+        cursor.execute('''
+        UPDATE users SET last_access = ? WHERE username = ?
+        ''', (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), username))
+        self.conn.commit()
+    
+    def add_access_log(self, user_id, method, success):
+        cursor = self.conn.cursor()
+        cursor.execute('''
+        INSERT INTO access_logs (user_id, timestamp, method, success)
+        VALUES (?, ?, ?, ?)
+        ''', (user_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), method, success))
+        self.conn.commit()
+    
+    def get_access_logs(self, user_id):
+        cursor = self.conn.cursor()
+        cursor.execute('''
+        SELECT timestamp, method, success FROM access_logs 
+        WHERE user_id = ? ORDER BY timestamp DESC
+        ''', (user_id,))
+        return cursor.fetchall()
+    
+    def get_all_users(self):
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT id, username, registered_at, last_access, face_samples FROM users')
+        return cursor.fetchall()
+    
+    def user_count(self):
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT COUNT(*) FROM users')
+        return cursor.fetchone()[0]
+    
+    def delete_user(self, user_id):
+        cursor = self.conn.cursor()
+        try:
+            # Delete access logs first (foreign key constraint)
+            cursor.execute('DELETE FROM access_logs WHERE user_id = ?', (user_id,))
+            # Delete user
+            cursor.execute('DELETE FROM users WHERE id = ?', (user_id,))
+            self.conn.commit()
+            return True
+        except Exception as e:
+            print(f"Error deleting user: {e}")
+            self.conn.rollback()
+            return False
+    
+    def close(self):
+        self.conn.close()
+
+# Initialize database
+db = Database()
+
+def hash_pin(pin):
+    """Hash a PIN for secure storage"""
+    return hashlib.sha256(pin.encode()).hexdigest()
+
+def verify_pin(pin_hash, pin):
+    """Verify a PIN against its hash"""
+    return pin_hash == hashlib.sha256(pin.encode()).hexdigest()
 
 def speak(text):
     def _speak():
@@ -137,13 +259,19 @@ class FaceRecognitionApp:
         ttk.Button(button_frame, text="View Users", 
                   image=self.users_icon, compound=tk.LEFT,
                   command=self.show_users_page).grid(row=2, column=0, padx=15, pady=15, sticky='ew')
+
+        # View Unknown Faces button
+        self.unknown_icon = self.create_icon("👻", icon_size) # Example icon
+        ttk.Button(button_frame, text="View Unknown Faces",
+                  image=self.unknown_icon, compound=tk.LEFT,
+                  command=self.show_unknown_faces_page).grid(row=3, column=0, padx=15, pady=15, sticky='ew')
         
         # Status bar
         status_frame = tk.Frame(self.current_frame, bg='#e6f2ff', bd=1, relief=tk.SUNKEN)
         status_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(20, 0))
         
         ttk.Label(status_frame, 
-                 text=f"System Status: {self.door_status} | Registered Users: {len(users)} | " + 
+                 text=f"System Status: {self.door_status} | Registered Users: {db.user_count()} | " + 
                       f"Face Recognition: {'Ready' if self.recognizer_trained else 'Not Trained'}",
                  style='Status.TLabel').pack(pady=5)
     
@@ -193,7 +321,7 @@ class FaceRecognitionApp:
             messagebox.showerror("Error", "Please enter a username")
             return
         
-        if username in users:
+        if db.get_user(username):
             messagebox.showerror("Error", "Username already exists")
             return
         
@@ -201,9 +329,22 @@ class FaceRecognitionApp:
         face_samples = []
         sample_count = 0
         required_samples = 30
+        face_already_registered = False
+        
+        # Function to check if face already exists in the system
+        def check_face_exists(face_img):
+            if not self.recognizer_trained:
+                return False, None
+                
+            id_, confidence = recognizer.predict(face_img)
+            if confidence < 50:  # If confidence is high (value is low)
+                user = db.get_user_by_id(id_)
+                if user:
+                    return True, user[1]  # Return True and the username
+            return False, None
         
         def update_frame():
-            nonlocal sample_count
+            nonlocal sample_count, face_already_registered
             ret, frame = cap.read()
             if not ret:
                 return
@@ -218,6 +359,17 @@ class FaceRecognitionApp:
                     
                     if face_variance > 50:
                         face_img = cv2.resize(face_roi, (200, 200))
+                        
+                        # Check if this face is already registered
+                        if sample_count == 0:  # Only check on the first good sample
+                            exists, existing_username = check_face_exists(face_img)
+                            if exists:
+                                face_already_registered = True
+                                cap.release()
+                                cv2.destroyAllWindows()
+                                messagebox.showerror("Error", f"This face is already registered under username '{existing_username}'")
+                                return
+                        
                         face_samples.append(face_img)
                         sample_count += 1
                         cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
@@ -237,37 +389,29 @@ class FaceRecognitionApp:
                 cv2.destroyAllWindows()
                 
                 if len(face_samples) >= 25:
-                    user_id = len(users) + 1
-                    user_dir = f"faces/{user_id}"
-                    os.makedirs(user_dir, exist_ok=True)
-                    
-                    for i, face in enumerate(face_samples):
-                        cv2.imwrite(f"{user_dir}/{i}.png", face)
-                    
-                    users[username] = {
-                        'id': user_id,
-                        'pin': None,
-                        'registered_at': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        'face_samples': len(face_samples),
-                        'last_access': None,
-                        'access_log': []
-                    }
-                    self.save_users()
-                    self.train_recognizer()
-                    
-                    messagebox.showinfo("Success", f"Face registered with {len(face_samples)} samples! Now set your PIN")
-                    self.setup_pin_after_registration(username)
+                    user_id = db.add_user(username, face_samples=len(face_samples))
+                    if user_id:
+                        user_dir = f"faces/{user_id}"
+                        os.makedirs(user_dir, exist_ok=True)
+                        
+                        for i, face in enumerate(face_samples):
+                            cv2.imwrite(f"{user_dir}/{i}.png", face)
+                        
+                        self.train_recognizer()
+                        
+                        messagebox.showinfo("Success", f"Face registered with {len(face_samples)} samples! Now set your PIN")
+                        self.setup_pin_after_registration(username)
                 else:
                     messagebox.showerror("Error", f"Not enough good quality face samples captured ({len(face_samples)}/25)")
         
-        while cap.isOpened() and sample_count < required_samples:
+        while cap.isOpened() and sample_count < required_samples and not face_already_registered:
             update_frame()
     
     def setup_pin_after_registration(self, username):
         pin = simpledialog.askstring("PIN Setup", "Set 4-digit PIN:", show='*')
         if pin and len(pin) == 4 and pin.isdigit():
-            users[username]['pin'] = pin
-            self.save_users()
+            pin_hash = hash_pin(pin)
+            db.update_user_pin(username, pin_hash)
             messagebox.showinfo("Success", "Registration complete!")
             speak(f"Registration successful for {username}")
             self.show_main_page()
@@ -288,12 +432,12 @@ class FaceRecognitionApp:
         ttk.Label(header_frame, text="Choose your authentication method", 
                  style='Status.TLabel').pack()
         
-        # Form frame
+        # Form frame for PIN login only
         form_frame = tk.Frame(self.current_frame, bg='#f0f8ff')
         form_frame.pack(pady=20)
         
         self.login_username_var = tk.StringVar()
-        ttk.Label(form_frame, text="Username:").grid(row=0, column=0, padx=10, pady=10, sticky='e')
+        ttk.Label(form_frame, text="Username (for PIN only):").grid(row=0, column=0, padx=10, pady=10, sticky='e')
         ttk.Entry(form_frame, textvariable=self.login_username_var, font=('Arial', 12)).grid(row=0, column=1, padx=10, pady=10)
         
         # Button frame
@@ -301,12 +445,12 @@ class FaceRecognitionApp:
         button_frame.pack(pady=30)
         
         self.face_icon = self.create_icon("👤", (30, 30))
-        ttk.Button(button_frame, text="Login with Face", 
+        ttk.Button(button_frame, text="Unlock with Face", 
                   image=self.face_icon, compound=tk.LEFT,
                   command=self.login_with_face).pack(side=tk.LEFT, padx=10)
         
         self.pin_icon = self.create_icon("🔢", (30, 30))
-        ttk.Button(button_frame, text="Login with PIN", 
+        ttk.Button(button_frame, text="Unlock with PIN", 
                   image=self.pin_icon, compound=tk.LEFT,
                   command=self.login_with_pin).pack(side=tk.LEFT, padx=10)
         
@@ -319,25 +463,18 @@ class FaceRecognitionApp:
         if not self.recognizer_trained:
             messagebox.showerror("Error", "Face recognizer not trained yet")
             return
-            
-        username = self.login_username_var.get().strip()
-        if not username:
-            messagebox.showerror("Error", "Please enter username")
-            return
         
-        if username not in users:
-            messagebox.showerror("Error", "User not found")
-            return
-        
-        user_id = users[username]['id']
         cap = cv2.VideoCapture(0)
         recognized = False
         attempts = 0
-        max_attempts = 3
+        max_attempts = 2
         confidence_threshold = 50
+        unknown_face_captured = False
+        recognized_user_id = None
+        recognized_username = None
         
         def recognize_face():
-            nonlocal recognized, attempts
+            nonlocal recognized, attempts, unknown_face_captured, recognized_user_id, recognized_username
             ret, frame = cap.read()
             if not ret:
                 return
@@ -360,10 +497,15 @@ class FaceRecognitionApp:
                     
                     id_, confidence = recognizer.predict(face_img)
                     
-                    if id_ == user_id and confidence < confidence_threshold:
+                    # Get user information based on recognized ID
+                    user = db.get_user_by_id(id_)
+                    
+                    if user and confidence < confidence_threshold:
                         recognized = True
+                        recognized_user_id = id_
+                        recognized_username = user[1]  # Username is at index 1
                         cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
-                        cv2.putText(frame, f"Welcome {username} ({confidence:.1f})", (x, y-10), 
+                        cv2.putText(frame, f"Welcome {recognized_username} ({confidence:.1f})", (x, y-10), 
                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
                     else:
                         attempts += 1
@@ -372,6 +514,18 @@ class FaceRecognitionApp:
                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                         cv2.putText(frame, f"Confidence: {confidence:.1f}", (x, y+h+20), 
                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+                        
+                        # Save unknown face if it's the last attempt and not yet captured
+                        if attempts >= max_attempts and not unknown_face_captured:
+                            unknown_face_captured = True
+                            # Ensure directory exists
+                            os.makedirs("logs/unknown_faces", exist_ok=True)
+                            # Save the unknown face with timestamp
+                            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                            unknown_face_path = f"logs/unknown_faces/unknown_{timestamp}.png"
+                            cv2.imwrite(unknown_face_path, face_img)
+                            print(f"Unknown face saved: {unknown_face_path}")
+                            self.send_alert_email(unknown_face_path)
             
             cv2.imshow('Face Login - Press Q to cancel', frame)
             
@@ -379,16 +533,15 @@ class FaceRecognitionApp:
                 cap.release()
                 cv2.destroyAllWindows()
                 
-                if recognized:
-                    self.current_user = username
-                    users[username]['last_access'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    self.save_users()
-                    speak(f"Welcome {username}. Door is now open")
-                    self.log_access(username, "FACE", True)
+                if recognized and recognized_username:
+                    self.current_user = recognized_username
+                    db.update_user_last_access(recognized_username)
+                    speak(f"Welcome {recognized_username}. Door is now open")
+                    db.add_access_log(recognized_user_id, "FACE", True)
                     self.show_door_open_page()
                 else:
                     messagebox.showerror("Error", "Face not recognized")
-                    self.log_access(username, "FACE", False)
+                    # We don't know which user attempted login, so we can't log it to a specific user
                     speak("Face recognition failed. Access denied")
         
         while cap.isOpened() and not recognized and attempts < max_attempts:
@@ -400,25 +553,25 @@ class FaceRecognitionApp:
             messagebox.showerror("Error", "Please enter username")
             return
         
-        if username not in users:
+        user = db.get_user(username)
+        if not user:
             messagebox.showerror("Error", "User not found")
             return
         
-        if not users[username]['pin']:
+        if not user[2]:  # pin_hash
             messagebox.showerror("Error", "No PIN set for this user")
             return
         
         pin = simpledialog.askstring("PIN Login", "Enter 4-digit PIN:", show='*')
-        if pin and pin == users[username]['pin']:
+        if pin and len(pin) == 4 and pin.isdigit() and verify_pin(user[2], pin):
             self.current_user = username
-            users[username]['last_access'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            self.save_users()
+            db.update_user_last_access(username)
             speak(f"Welcome {username}. Door is now open")
-            self.log_access(username, "PIN", True)
+            db.add_access_log(user[0], "PIN", True)
             self.show_door_open_page()
         else:
             messagebox.showerror("Error", "Incorrect PIN")
-            self.log_access(username, "PIN", False)
+            db.add_access_log(user[0], "PIN", False)
             speak("Incorrect PIN. Access denied")
     
     def show_door_open_page(self):
@@ -505,14 +658,13 @@ class FaceRecognitionApp:
         self.user_tree.heading("Face Samples", text="Samples", anchor=tk.CENTER)
         
         # Add data to treeview
-        for username in users:
-            user_data = users[username]
+        for user in db.get_all_users():
             self.user_tree.insert("", tk.END, values=(
-                user_data['id'],
-                username,
-                user_data['registered_at'],
-                user_data.get('last_access', 'Never'),
-                user_data.get('face_samples', 0)
+                user[0],  # ID
+                user[1],  # Username
+                user[2],  # Registered At
+                user[3] if user[3] else 'Never',  # Last Access
+                user[4] if user[4] else 0  # Face Samples
             ))
         
         self.user_tree.pack(fill=tk.BOTH, expand=True)
@@ -525,6 +677,14 @@ class FaceRecognitionApp:
         ttk.Button(button_frame, text="View Access Log", 
                   image=self.log_icon, compound=tk.LEFT,
                   command=self.show_access_log).pack(side=tk.LEFT, padx=10)
+        
+        # Add delete user button (only visible for admin users)
+        self.delete_icon = self.create_icon("🗑️", (25, 25))
+        # Check if current user is admin or Cantor
+        if self.current_user and self.current_user.lower() in ['admin', 'cantor']:
+            ttk.Button(button_frame, text="Delete User", 
+                      image=self.delete_icon, compound=tk.LEFT,
+                      command=self.delete_user).pack(side=tk.LEFT, padx=10)
         
         self.back_icon = self.create_icon("⬅", (25, 25))
         ttk.Button(button_frame, text="Back to Main", 
@@ -577,14 +737,13 @@ class FaceRecognitionApp:
         log_tree.heading("Success", text="Success", anchor=tk.CENTER)
         
         # Add data to treeview
-        if 'access_log' in users[username]:
-            for log in reversed(users[username]['access_log']):  # Show most recent first
-                success_text = "✅" if log['success'] else "❌"
-                log_tree.insert("", tk.END, values=(
-                    log['timestamp'],
-                    log['method'],
-                    success_text
-                ))
+        for log in db.get_access_logs(user_id):
+            success_text = "✅" if log[2] else "❌"
+            log_tree.insert("", tk.END, values=(
+                log[0],  # Timestamp
+                log[1],  # Method
+                success_text
+            ))
         
         log_tree.pack(fill=tk.BOTH, expand=True)
         
@@ -592,7 +751,102 @@ class FaceRecognitionApp:
         ttk.Button(log_window, text="Close", 
                   command=log_window.destroy).pack(pady=10)
     
+    def delete_user(self):
+        # Check if current user has permission (admin or Cantor)
+        if not self.current_user or self.current_user.lower() not in ['admin', 'cantor']:
+            messagebox.showerror("Error", "You don't have permission to delete users")
+            return
+        
+        selected = self.user_tree.focus()
+        if not selected:
+            messagebox.showwarning("Warning", "Please select a user to delete")
+            return
+        
+        user_id = self.user_tree.item(selected)['values'][0]
+        username = self.user_tree.item(selected)['values'][1]
+        
+        # Don't allow deleting the current user or admin accounts
+        if username.lower() in ['admin', 'cantor'] or username == self.current_user:
+            messagebox.showerror("Error", "Cannot delete this user")
+            return
+        
+        # Confirm deletion
+        confirm = messagebox.askyesno("Confirm Deletion", 
+                                    f"Are you sure you want to delete user '{username}'?\n\nThis will remove all user data and cannot be undone.")
+        
+        if confirm:
+            # Delete user's face samples
+            user_dir = f"faces/{user_id}"
+            if os.path.exists(user_dir):
+                for file in os.listdir(user_dir):
+                    os.remove(f"{user_dir}/{file}")
+                os.rmdir(user_dir)
+            
+            # Delete user from database
+            success = db.delete_user(user_id)
+            
+            # Retrain recognizer
+            self.train_recognizer()
+            
+            # Refresh user list
+            messagebox.showinfo("Success", f"User '{username}' has been deleted")
+            self.show_users_page()
+    
+    def send_alert_email(self, image_path=None):
+        # Email configuration - in a real application, these should be stored securely
+        # Consider using environment variables or a secure configuration file
+        sender_email = "xxxxxxxxx@gmail.com"  # Replace with your email
+        receiver_email = "xxxxxxxxx@gmail.com"  # Replace with recipient email
+        password = "xxxxxxxxxxxxxx"  # IMPORTANT: Hardcoding passwords is a security risk!
+        
+        # Create a more detailed email message
+        msg = MIMEMultipart()
+        msg['From'] = sender_email
+        msg['To'] = receiver_email
+        msg['Subject'] = "SECURITY ALERT: Unknown Face Detected at " + datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        # Create a more informative message body
+        body = f"""SECURITY ALERT
+
+An unknown face was detected attempting to access the secure door system.
+
+Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+Location: Main Entrance
+Action Taken: Access Denied
+
+This is an automated security notification. Please review the attached image and take appropriate action if necessary.
+"""
+        
+        msg.attach(MIMEText(body, 'plain'))
+        
+        # Attach the unknown face image if available
+        if image_path and os.path.exists(image_path):
+            with open(image_path, 'rb') as fp:
+                img = MIMEImage(fp.read())
+            img.add_header('Content-Disposition', 'attachment', filename=os.path.basename(image_path))
+            msg.attach(img)
+
+        try:
+            # Connect to the SMTP server with proper error handling
+            server = smtplib.SMTP('smtp.gmail.com', 587)
+            server.starttls()
+            
+            try:
+                server.login(sender_email, password)
+                server.sendmail(sender_email, receiver_email, msg.as_string())
+                print("Security alert email sent successfully.")
+            except smtplib.SMTPAuthenticationError:
+                print("Error: Email authentication failed. Check credentials or app password settings.")
+            except smtplib.SMTPException as e:
+                print(f"SMTP error occurred: {e}")
+            finally:
+                server.quit()
+        except Exception as e:
+            print(f"Error sending email: {e}")
+            # In a production system, you might want to log this error or have a backup notification method
+
     def train_recognizer(self):
+        users = db.get_all_users()
         if not users:
             self.recognizer_trained = False
             return
@@ -601,7 +855,7 @@ class FaceRecognitionApp:
         ids = []
         
         for user in users:
-            user_id = users[user]['id']
+            user_id = user[0]
             user_dir = f"faces/{user_id}"
             
             if os.path.exists(user_dir):
@@ -612,6 +866,7 @@ class FaceRecognitionApp:
                         img = cv2.resize(img, (200, 200))
                         faces.append(img)
                         ids.append(user_id)
+                        
         
         if faces and ids:
             recognizer.train(faces, np.array(ids))
@@ -621,25 +876,73 @@ class FaceRecognitionApp:
         else:
             self.recognizer_trained = False
             print("No training data available")
-    
-    def log_access(self, username, method, success):
-        log_entry = {
-            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            'method': method,
-            'success': success
-        }
+
+    def show_unknown_faces_page(self):
+        self.clear_frame()
+        self.current_frame = tk.Frame(self.root, bg='#f0f8ff')
+        self.current_frame.pack(expand=True, fill='both', padx=40, pady=40)
+
+        ttk.Label(self.current_frame, text="Unknown Faces Log", style='Header.TLabel').pack(pady=(0, 20))
+
+        canvas_frame = tk.Frame(self.current_frame, bg='#f0f8ff')
+        canvas_frame.pack(fill='both', expand=True)
+
+        canvas = tk.Canvas(canvas_frame, bg='#f0f8ff')
+        scrollbar = ttk.Scrollbar(canvas_frame, orient="vertical", command=canvas.yview)
+        scrollable_frame = ttk.Frame(canvas, style='TFrame') # Use TFrame for styling if needed
+
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(
+                scrollregion=canvas.bbox("all")
+            )
+        )
+
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        unknown_faces_dir = "logs/unknown_faces"
+        if not os.path.exists(unknown_faces_dir) or not os.listdir(unknown_faces_dir):
+            ttk.Label(scrollable_frame, text="No unknown faces recorded.", style='Status.TLabel').pack(pady=20)
+        else:
+            row, col = 0, 0
+            max_cols = 4 # Adjust as needed
+            for i, filename in enumerate(os.listdir(unknown_faces_dir)):
+                if filename.lower().endswith(('.png', '.jpg', '.jpeg')):
+                    try:
+                        img_path = os.path.join(unknown_faces_dir, filename)
+                        img = Image.open(img_path)
+                        img.thumbnail((150, 150))  # Resize for display
+                        photo_img = ImageTk.PhotoImage(img)
+                        
+                        img_label = ttk.Label(scrollable_frame, image=photo_img)
+                        img_label.image = photo_img # Keep a reference!
+                        img_label.grid(row=row, column=col, padx=10, pady=10)
+                        
+                        filename_label = ttk.Label(scrollable_frame, text=filename, style='Status.TLabel')
+                        filename_label.grid(row=row+1, column=col, padx=10, pady=2)
+                        
+                        col += 1
+                        if col >= max_cols:
+                            col = 0
+                            row += 2 # Increment by 2 for image and label
+                    except Exception as e:
+                        print(f"Error loading image {filename}: {e}")
         
-        if 'access_log' not in users[username]:
-            users[username]['access_log'] = []
-        
-        users[username]['access_log'].append(log_entry)
-        self.save_users()
-    
-    def save_users(self):
-        with open('user_data/users.pkl', 'wb') as f:
-            pickle.dump(users, f)
+        # Back button
+        button_frame = tk.Frame(self.current_frame, bg='#f0f8ff') # Ensure this frame is separate
+        button_frame.pack(pady=20, side=tk.BOTTOM)
+        self.back_icon_unknown = self.create_icon("⬅", (25, 25))
+        ttk.Button(button_frame, text="Back to Main", 
+                  image=self.back_icon_unknown, compound=tk.LEFT,
+                  command=self.show_main_page).pack()
 
 if __name__ == "__main__":
+
     root = tk.Tk()
     app = FaceRecognitionApp(root)
     root.mainloop()
+    db.close()
