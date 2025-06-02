@@ -793,57 +793,74 @@ class FaceRecognitionApp:
             self.show_users_page()
     
     def send_alert_email(self, image_path=None):
-        # Email configuration - in a real application, these should be stored securely
-        # Consider using environment variables or a secure configuration file
-        sender_email = "xxxxxxxxx@gmail.com"  # Replace with your email
-        receiver_email = "xxxxxxxxx@gmail.com"  # Replace with recipient email
-        password = "xxxxxxxxxxxxxx"  # IMPORTANT: Hardcoding passwords is a security risk!
-        
-        # Create a more detailed email message
-        msg = MIMEMultipart()
-        msg['From'] = sender_email
-        msg['To'] = receiver_email
-        msg['Subject'] = "SECURITY ALERT: Unknown Face Detected at " + datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # Gmail SMTP settings
+        HOST = "smtp.gmail.com"
+        PORT = 587
 
-        # Create a more informative message body
-        body = f"""SECURITY ALERT
+        FROM_EMAIL = "xxxxxxxxx@gmail.com"    # enter sender email 🤙🤙👅👅
+        TO_EMAIL = "xxxxxxxxxx@gmail.com" #  enter reserver email 🤙🤙👅
+        APP_PASSWORD = "xxxxxxxxxx"  # 16-char app password from Google
 
-An unknown face was detected attempting to access the secure door system.
+        # Create the email message
+        message = MIMEMultipart("alternative")
+        message["Subject"] = "Smart Door Lock Alert: Unknown Face Detected at " + datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        message["From"] = FROM_EMAIL
+        message["To"] = TO_EMAIL
 
-Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-Location: Main Entrance
-Action Taken: Access Denied
+        # Email content (plain and HTML versions)
+        text = f"""\
+        Hello,
 
-This is an automated security notification. Please review the attached image and take appropriate action if necessary.
-"""
-        
-        msg.attach(MIMEText(body, 'plain'))
-        
+        An unknown face was detected attempting to access the smart door lock system.
+
+        Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+        Location: Main Entrance
+        Action Taken: Access Denied
+
+        Please review the attached image if available.
+
+        Regards,
+        Smart Lock Bot
+        """
+
+        html = f"""\
+        <html>
+          <body>
+            <h2>Smart Door Lock Notification</h2>
+            <p>An unknown face was detected attempting to access the <i>smart door lock system</i>.</p>
+            <p><b>Timestamp:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}<br>
+               <b>Location:</b> Main Entrance<br>
+               <b>Action Taken:</b> Access Denied</p>
+            <p>Please review the attached image if available.</p>
+            <p>Regards,<br>Smart Lock Bot</p>
+          </body>
+        </html>
+        """
+
+        # Attach both plain and HTML versions
+        part1 = MIMEText(text, "plain")
+        part2 = MIMEText(html, "html")
+        message.attach(part1)
+        message.attach(part2)
+
         # Attach the unknown face image if available
         if image_path and os.path.exists(image_path):
             with open(image_path, 'rb') as fp:
                 img = MIMEImage(fp.read())
             img.add_header('Content-Disposition', 'attachment', filename=os.path.basename(image_path))
-            msg.attach(img)
+            message.attach(img)
 
+        # Send email
         try:
-            # Connect to the SMTP server with proper error handling
-            server = smtplib.SMTP('smtp.gmail.com', 587)
-            server.starttls()
-            
-            try:
-                server.login(sender_email, password)
-                server.sendmail(sender_email, receiver_email, msg.as_string())
-                print("Security alert email sent successfully.")
-            except smtplib.SMTPAuthenticationError:
-                print("Error: Email authentication failed. Check credentials or app password settings.")
-            except smtplib.SMTPException as e:
-                print(f"SMTP error occurred: {e}")
-            finally:
-                server.quit()
+            smtp = smtplib.SMTP(HOST, PORT)
+            smtp.ehlo()
+            smtp.starttls()
+            smtp.login(FROM_EMAIL, APP_PASSWORD)
+            smtp.sendmail(FROM_EMAIL, TO_EMAIL, message.as_string())
+            smtp.quit()
+            print("[+] Security alert email sent successfully.")
         except Exception as e:
-            print(f"Error sending email: {e}")
-            # In a production system, you might want to log this error or have a backup notification method
+            print(f"[!] Failed to send security alert email: {e}")
 
     def train_recognizer(self):
         users = db.get_all_users()
