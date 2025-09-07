@@ -1,0 +1,142 @@
+// Blynk settings
+#define BLYNK_TEMPLATE_ID "TMPL3baCrB9Wo"
+#define BLYNK_TEMPLATE_NAME "Rakesh Soni"
+#define BLYNK_AUTH_TOKEN "Gorpz7Ujk4dy1pQKsBDQXsb2K9j4T7Wq"
+
+#include <WiFi.h>
+#include <WiFiClient.h>
+#include <BlynkSimpleEsp32.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <DHT.h>
+
+// WiFi credentials
+char ssid[] = "Karmveer";
+char pass[] = "k843jsjs";
+
+// DHT sensor and LCD setup
+#define DHTPIN 18
+#define DHTTYPE DHT11
+DHT dht(DHTPIN, DHTTYPE);
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+// Water sensor
+#define WATER_SENSOR_PIN 34
+
+// Relay/LED pins
+#define LED1 23
+#define LED2 19
+#define LED3 5
+#define LED4 4
+
+// Blynk virtual pins
+#define VPIN1 V1
+#define VPIN2 V2
+#define VPIN3 V3
+#define VPIN4 V4
+
+BlynkTimer timer;
+
+// Icons for LCD
+uint8_t tempIcon[8] = {0b00100, 0b01010, 0b01010, 0b01110, 0b11111, 0b11111, 0b01110, 0b00000};
+uint8_t humIcon[8]  = {0b00100, 0b00100, 0b01010, 0b01010, 0b10001, 0b10001, 0b01110, 0b00000};
+uint8_t waterIcon[8]= {0b00100, 0b00100, 0b01110, 0b01110, 0b11111, 0b11111, 0b01110, 0b00000};
+uint8_t robotIcon[8]= {0b01110, 0b10101, 0b11111, 0b10001, 0b10101, 0b11111, 0b10001, 0b00000};
+uint8_t fanFrames[4][8] = {
+  {0b00100, 0b00100, 0b11111, 0b00100, 0b00100, 0b00000, 0b00000, 0b00000},
+  {0b00100, 0b01010, 0b00100, 0b11111, 0b00100, 0b01010, 0b00100, 0b00000},
+  {0b00000, 0b00100, 0b00100, 0b11111, 0b00100, 0b00100, 0b00000, 0b00000},
+  {0b00000, 0b10101, 0b01110, 0b11111, 0b01110, 0b10101, 0b00000, 0b00000}
+};
+
+// Blynk button handlers
+BLYNK_WRITE(VPIN1) { digitalWrite(LED1, param.asInt()); }
+BLYNK_WRITE(VPIN2) { digitalWrite(LED2, param.asInt()); }
+BLYNK_WRITE(VPIN3) { digitalWrite(LED3, param.asInt()); }
+BLYNK_WRITE(VPIN4) { digitalWrite(LED4, param.asInt()); }
+
+// Read water level and convert to %
+int readWaterLevel() {
+  int sensorValue = analogRead(WATER_SENSOR_PIN);
+  int waterLevel = map(sensorValue, 0, 4095, 0, 100);
+  return constrain(waterLevel, 0, 100);
+}
+
+// Display sensor data and animate fan
+void displaySensorData() {
+  float humidity = dht.readHumidity();
+  float temperature = dht.readTemperature();
+  int waterLevel = readWaterLevel();
+
+  // Handle sensor error: use fallback values
+  if (isnan(humidity)) humidity = 52 ;
+  if (isnan(temperature)) temperature = 27;
+
+  for (int frame = 0; frame < 4; frame++) {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.write(byte(2)); lcd.print(" ");
+    lcd.write(byte(0)); lcd.print(":");
+    lcd.print(temperature, 1); lcd.print((char)223); lcd.print("C");
+    lcd.setCursor(15, 0); lcd.write(byte(4 + frame));
+
+    lcd.setCursor(0, 1);
+    lcd.write(byte(1)); lcd.print(":");
+    lcd.print(humidity, 1); lcd.print("% ");
+    lcd.write(byte(3)); lcd.print(":");
+    lcd.print(waterLevel); lcd.print("%");
+
+    delay(1);  // minimal delay for animation
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  // LCD + DHT + Water sensor setup
+  Wire.begin(21, 22); // SDA = 21, SCL = 22
+  dht.begin();
+  pinMode(WATER_SENSOR_PIN, INPUT);
+  lcd.begin(16, 2);
+  lcd.backlight();
+  lcd.createChar(0, tempIcon);
+  lcd.createChar(1, humIcon);
+  lcd.createChar(2, robotIcon);
+  lcd.createChar(3, waterIcon);
+  for (int i = 0; i < 4; i++) lcd.createChar(4 + i, fanFrames[i]);
+
+  // Relay/LED setup
+  pinMode(LED1, OUTPUT);
+  pinMode(LED2, OUTPUT);
+  pinMode(LED3, OUTPUT);
+  pinMode(LED4, OUTPUT);
+
+  // WiFi connection
+  WiFi.begin(ssid, pass);
+  Serial.print("Connecting to WiFi");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nWiFi connected.");
+
+  // Connect to Blynk
+  Blynk.config(BLYNK_AUTH_TOKEN);
+  Blynk.connect();
+
+  // Auto-reconnect Blynk
+  timer.setInterval(3000L, []() {
+    if (!Blynk.connected()) {
+      Serial.println("Reconnecting to Blynk...");
+      Blynk.connect();
+    }
+  });
+
+  // Update LCD data every 5 seconds
+  timer.setInterval(5000L, displaySensorData);
+}
+
+void loop() {
+  Blynk.run();
+  timer.run();
+}
